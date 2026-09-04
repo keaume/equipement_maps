@@ -6,6 +6,8 @@
 <title>Sites p&eacute;troliers et permis &mdash; Qu&eacute;bec</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <style>
   :root {
     --bg: #f4f6f5;
@@ -107,7 +109,6 @@
   .search-box input { flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
   .search-box button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-weight: 600; cursor: pointer; }
   .search-box button:hover { background: var(--accent-dark); }
-  datalist {}
 
   .legend {
     position: absolute; bottom: 20px; left: 12px; z-index: 900;
@@ -120,15 +121,15 @@
   }
   .legend .title { font-weight: 700; margin-bottom: 6px; }
   .legend .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
-  .legend .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.25); }
+  .legend .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.3); }
 
-  .leaflet-popup-content { font-size: 13px; line-height: 1.5; }
-  .leaflet-popup-content b { font-size: 14px; }
+  .leaflet-popup-content { font-size: 13px; line-height: 1.6; }
+  .leaflet-popup-content b.title { font-size: 14px; display: block; margin-bottom: 4px; }
+  .leaflet-popup-content .warn { color: #b3401f; font-weight: 700; }
+  .leaflet-popup-content .ok { color: #1f7a4d; font-weight: 600; }
 
-  .loading-msg {
-    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-    z-index: 800; color: var(--muted); font-size: 14px;
-  }
+  .site-cluster { border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-family: inherit; font-weight: 700; color: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.6); }
 
   @media (max-width: 640px) {
     .panel, .search-box { width: calc(50% - 18px); }
@@ -162,10 +163,18 @@
     <select id="filter-region-sites" onchange="applyFilters('sites')"></select>
     <label>Municipalit&eacute;</label>
     <select id="filter-muni-sites" onchange="applyFilters('sites')"></select>
+    <div class="checkbox-row">
+      <input type="checkbox" id="filter-sanspermis-sites" onchange="applyFilters('sites')">
+      <label for="filter-sanspermis-sites">Sans permis actif seulement</label>
+    </div>
     <button class="reset" onclick="resetFilters('sites')">R&eacute;initialiser</button>
     <div class="count" id="count-sites"></div>
   </div>
-  <div class="legend" id="legend-sites"></div>
+  <div class="legend" id="legend-sites">
+    <div class="title">L&eacute;gende</div>
+    <div class="row"><span class="dot" style="background:#3aa65a"></span>Site avec permis actif</div>
+    <div class="row"><span class="dot" style="background:#9a9a9a"></span>Sans permis actif</div>
+  </div>
 </div>
 
 <div id="view-permis" class="view">
@@ -187,12 +196,17 @@
     <select id="filter-muni-permis" onchange="applyFilters('permis')"></select>
     <div class="checkbox-row">
       <input type="checkbox" id="filter-expire-permis" onchange="applyFilters('permis')">
-      <label for="filter-expire-permis">Permis expirant dans 12 mois seulement</label>
+      <label for="filter-expire-permis">Expir&eacute;s ou expirant dans 12 mois</label>
     </div>
     <button class="reset" onclick="resetFilters('permis')">R&eacute;initialiser</button>
     <div class="count" id="count-permis"></div>
   </div>
-  <div class="legend" id="legend-permis"></div>
+  <div class="legend" id="legend-permis">
+    <div class="title">L&eacute;gende</div>
+    <div class="row"><span class="dot" style="background:#3aa65a"></span>Valide (&gt; 12 mois)</div>
+    <div class="row"><span class="dot" style="background:#e8892f"></span>Expire dans 12 mois</div>
+    <div class="row"><span class="dot" style="background:#d1402f"></span>D&eacute;j&agrave; expir&eacute;</div>
+  </div>
 </div>
 
 <script>
@@ -206,98 +220,123 @@ const REGION_NAMES = {
 const QC_CENTER = [50.0, -70.5];
 const QC_ZOOM = 6;
 
+let allPoints = [];
+
 const state = {
-  sites: { raw: [], data: [], map: null, layer: null, ready: false },
-  permis: { raw: [], data: [], map: null, layer: null, ready: false },
+  sites: { raw: [], data: [], map: null, cluster: null },
+  permis: { raw: [], data: [], map: null, cluster: null },
 };
 
 function numberFmt(n) {
   return new Intl.NumberFormat('fr-CA').format(Math.round(n));
 }
 
-function colorForCount(count, breaks) {
-  if (count <= breaks[0]) return '#3aa65a';
-  if (count <= breaks[1]) return '#e7c744';
-  if (count <= breaks[2]) return '#e8892f';
-  return '#d1402f';
+function permitStatus(d) {
+  if (!d.date_expiration) return 'ok';
+  const exp = new Date(d.date_expiration);
+  const now = new Date();
+  if (exp < now) return 'expired';
+  const in12 = new Date(now); in12.setFullYear(in12.getFullYear() + 1);
+  if (exp <= in12) return 'soon';
+  return 'ok';
 }
 
-function computeBreaks(counts) {
-  const sorted = [...counts].sort((a,b) => a-b);
-  const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
-  return [q(0.5), q(0.8), q(0.95)];
+function colorForSite(d) {
+  return d.has_permit ? '#3aa65a' : '#9a9a9a';
 }
 
-function radiusForCount(count, maxCount) {
-  const r = 5 + 22 * Math.sqrt(count / Math.max(1, maxCount));
-  return Math.max(5, Math.min(28, r));
+function colorForPermis(d) {
+  const st = permitStatus(d);
+  if (st === 'expired') return '#d1402f';
+  if (st === 'soon') return '#e8892f';
+  return '#3aa65a';
 }
 
-function initMap(key) {
+function clusterIcon(color) {
+  return function (cluster) {
+    const count = cluster.getChildCount();
+    const size = count < 10 ? 32 : count < 50 ? 38 : count < 200 ? 46 : 54;
+    return L.divIcon({
+      html: `<div class="site-cluster" style="width:${size}px;height:${size}px;background:${color};font-size:${size > 40 ? 13 : 11}px;">${count}</div>`,
+      className: '',
+      iconSize: L.point(size, size),
+    });
+  };
+}
+
+function cleanAddr(s) {
+  if (!s) return s;
+  return s.replace(/\s*QC\s*CANADA\s*[A-Z]\d[A-Z]\s*\d[A-Z]\d\s*$/i, '').trim();
+}
+
+function popupHtmlSites(d) {
+  const adresse = d.has_permit ? cleanAddr(d.adresse_site) : `${d.no_immeuble} ${d.type_de_rue} ${d.nom_de_la_rue}, ${d.municipalite}`;
+  let html = `<b class="title">${d.has_permit ? (d.nom_du_site || d.municipalite) : d.municipalite}</b>`;
+  html += `📍 ${adresse}<br>`;
+  html += `🏘️ ${d.municipalite} &mdash; ${d.region_nom}<br>`;
+  html += `🔖 No site&nbsp;: ${d.no_site}<br>`;
+  html += d.has_permit
+    ? `<span class="ok">✔ Permis actif (${d.no_permis})</span>`
+    : `<span style="color:#777;">Aucun permis actif associ&eacute;</span>`;
+  return html;
+}
+
+function popupHtmlPermis(d) {
+  const st = permitStatus(d);
+  let html = `<b class="title">${d.nom_du_site || d.titulaire}</b>`;
+  html += `👤 ${d.titulaire}<br>`;
+  html += `📍 ${cleanAddr(d.adresse_site)}<br>`;
+  html += `🏘️ ${d.municipalite} &mdash; ${d.region_nom}<br>`;
+  html += `🔖 No permis&nbsp;: ${d.no_permis}<br>`;
+  html += `📅 &Eacute;mission&nbsp;: ${d.date_emission || '—'}<br>`;
+  html += st === 'expired'
+    ? `<span class="warn">⚠ Expir&eacute; le ${d.date_expiration}</span><br>`
+    : st === 'soon'
+      ? `<span class="warn">⚠ Expire le ${d.date_expiration}</span><br>`
+      : `📅 Expiration&nbsp;: ${d.date_expiration || '—'}<br>`;
+  html += `🔧 Prochaine v&eacute;rification&nbsp;: ${d.date_prochaine_verif || '—'}<br>`;
+  html += `🛢️ Capacit&eacute; autoris&eacute;e&nbsp;: ${d.capacite_litres != null ? numberFmt(d.capacite_litres) + ' L' : '—'}<br>`;
+  html += `⚙️ Nombre d'appareils autoris&eacute;s&nbsp;: ${d.nbre_autorise != null ? numberFmt(d.nbre_autorise) : '—'}`;
+  return html;
+}
+
+function initMap(key, color) {
   const s = state[key];
-  s.map = L.map('map-' + key, { zoomControl: true }).setView(QC_CENTER, QC_ZOOM);
+  s.map = L.map('map-' + key, { zoomControl: true, preferCanvas: true }).setView(QC_CENTER, QC_ZOOM);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
     maxZoom: 18,
   }).addTo(s.map);
-  s.layer = L.layerGroup().addTo(s.map);
-}
-
-function popupHtmlSites(d) {
-  return `<b>${d.municipalite}</b><br>${d.region_nom}<br>${numberFmt(d.count)} site(s) et &eacute;quipement(s) p&eacute;trolier(s)`;
-}
-
-function popupHtmlPermis(d) {
-  return `<b>${d.municipalite}</b><br>${d.region_nom}<br>`
-    + `${numberFmt(d.count)} permis actif(s)<br>`
-    + `Capacit&eacute; autoris&eacute;e totale&nbsp;: ${numberFmt(d.capacite_totale)}&nbsp;L<br>`
-    + `Nombre d'appareils autoris&eacute;s&nbsp;: ${numberFmt(d.nbre_autorise_total)}`
-    + (d.expirent_bientot > 0 ? `<br><span style="color:#b3401f;font-weight:600;">${d.expirent_bientot} permis expirant dans 12 mois</span>` : '');
-}
-
-function renderLegend(key, breaks) {
-  const el = document.getElementById('legend-' + key);
-  const labels = [
-    { color: '#3aa65a', label: `≤ ${Math.round(breaks[0])}` },
-    { color: '#e7c744', label: `${Math.round(breaks[0])+1} – ${Math.round(breaks[1])}` },
-    { color: '#e8892f', label: `${Math.round(breaks[1])+1} – ${Math.round(breaks[2])}` },
-    { color: '#d1402f', label: `> ${Math.round(breaks[2])}` },
-  ];
-  el.innerHTML = '<div class="title">Nombre par municipalit&eacute;</div>' +
-    labels.map(l => `<div class="row"><span class="dot" style="background:${l.color}"></span>${l.label}</div>`).join('');
 }
 
 function draw(key) {
   const s = state[key];
-  s.layer.clearLayers();
-  const counts = s.data.map(d => d.count);
-  if (counts.length === 0) {
-    document.getElementById('count-' + key).textContent = '0 point(s) affiché(s)';
-    document.getElementById('infobar-' + key).textContent =
-      (key === 'sites' ? 'Sites et équipements pétroliers' : 'Titulaires de permis') + ' — 0 résultat';
-    return;
-  }
-  const breaks = computeBreaks(counts);
-  const maxCount = Math.max(...counts);
-  renderLegend(key, breaks);
+  if (s.cluster) s.map.removeLayer(s.cluster);
 
-  s.data.forEach(d => {
-    const marker = L.circleMarker([d.lat, d.lon], {
-      radius: radiusForCount(d.count, maxCount),
-      fillColor: colorForCount(d.count, breaks),
-      color: '#2b2b2b',
-      weight: 1,
-      fillOpacity: 0.75,
-    });
-    marker.bindPopup(key === 'sites' ? popupHtmlSites(d) : popupHtmlPermis(d));
-    marker.addTo(s.layer);
+  s.cluster = L.markerClusterGroup({
+    maxClusterRadius: 50,
+    iconCreateFunction: clusterIcon(key === 'sites' ? '#2f8f57' : '#2f6f8f'),
   });
 
-  const totalPoints = s.data.reduce((a, d) => a + d.count, 0);
-  document.getElementById('count-' + key).textContent = `${s.data.length} municipalité(s) affichée(s) — ${numberFmt(totalPoints)} au total`;
+  s.data.forEach(d => {
+    const color = key === 'sites' ? colorForSite(d) : colorForPermis(d);
+    const marker = L.circleMarker([d.lat, d.lon], {
+      radius: 7,
+      fillColor: color,
+      color: '#2b2b2b',
+      weight: 1,
+      fillOpacity: 0.85,
+    });
+    marker.bindPopup(key === 'sites' ? popupHtmlSites(d) : popupHtmlPermis(d));
+    s.cluster.addLayer(marker);
+  });
+
+  s.map.addLayer(s.cluster);
+
+  document.getElementById('count-' + key).textContent = `${numberFmt(s.data.length)} point(s) affiché(s)`;
   document.getElementById('infobar-' + key).textContent =
     (key === 'sites' ? '\u{1F6E2}️ Sites et équipements pétroliers — ' : '\u{1F4CB} Titulaires de permis — ')
-    + `${numberFmt(totalPoints)} ${key === 'sites' ? 'site(s)' : 'permis'}`;
+    + `${numberFmt(s.data.length)} ${key === 'sites' ? 'site(s)' : 'permis'}`;
 }
 
 function populateFilters(key) {
@@ -317,19 +356,21 @@ function populateFilters(key) {
 function applyFilters(key) {
   const regionVal = document.getElementById('filter-region-' + key).value;
   const muniVal = document.getElementById('filter-muni-' + key).value;
+  const sansPermisOnly = key === 'sites' && document.getElementById('filter-sanspermis-sites').checked;
   const expireOnly = key === 'permis' && document.getElementById('filter-expire-permis').checked;
 
   state[key].data = state[key].raw.filter(d => {
     if (regionVal && String(d.region_code) !== regionVal) return false;
     if (muniVal && d.municipalite !== muniVal) return false;
-    if (expireOnly && !(d.expirent_bientot > 0)) return false;
+    if (sansPermisOnly && d.has_permit) return false;
+    if (expireOnly && permitStatus(d) === 'ok') return false;
     return true;
   });
   draw(key);
 
   if (muniVal) {
-    const target = state[key].data.find(d => d.municipalite === muniVal);
-    if (target) state[key].map.setView([target.lat, target.lon], 11);
+    const pts = state[key].data.map(d => [d.lat, d.lon]);
+    if (pts.length) state[key].map.fitBounds(pts, { padding: [60, 60], maxZoom: 13 });
   } else if (regionVal) {
     const pts = state[key].data.map(d => [d.lat, d.lon]);
     if (pts.length) state[key].map.fitBounds(pts, { padding: [40, 40] });
@@ -341,6 +382,7 @@ function applyFilters(key) {
 function resetFilters(key) {
   document.getElementById('filter-region-' + key).value = '';
   document.getElementById('filter-muni-' + key).value = '';
+  if (key === 'sites') document.getElementById('filter-sanspermis-sites').checked = false;
   if (key === 'permis') document.getElementById('filter-expire-permis').checked = false;
   document.getElementById('search-' + key).value = '';
   applyFilters(key);
@@ -368,23 +410,26 @@ function switchTab(key) {
   }
 }
 
-async function loadData(key, url) {
-  const res = await fetch(url);
-  const raw = await res.json();
-  state[key].raw = raw;
-  state[key].data = raw;
-  populateFilters(key);
-  draw(key);
-}
-
-(async function main() {
+async function main() {
   initMap('sites');
   initMap('permis');
-  await Promise.all([
-    loadData('sites', 'sites_data.json'),
-    loadData('permis', 'permis_data.json'),
-  ]);
-})();
+
+  const res = await fetch('sites_points.json');
+  allPoints = await res.json();
+
+  state.sites.raw = allPoints;
+  state.sites.data = allPoints;
+  populateFilters('sites');
+  draw('sites');
+
+  const permisPoints = allPoints.filter(d => d.has_permit);
+  state.permis.raw = permisPoints;
+  state.permis.data = permisPoints;
+  populateFilters('permis');
+  draw('permis');
+}
+
+main();
 </script>
 
 </body>
