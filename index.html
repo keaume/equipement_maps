@@ -131,6 +131,20 @@
   .site-cluster { border-radius: 50%; display: flex; align-items: center; justify-content: center;
     font-family: inherit; font-weight: 700; color: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.6); }
 
+  .compare-wrap { position: absolute; inset: 0; display: flex; }
+  .compare-pane { position: relative; flex: 1 1 50%; min-width: 0; border-right: 2px solid var(--accent-dark); }
+  .compare-pane:last-child { border-right: none; }
+  .compare-label {
+    position: absolute; top: 8px; left: 8px; z-index: 900;
+    background: var(--panel-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 10px; font-size: 12px; font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,.12);
+  }
+  .compare-count {
+    position: absolute; top: 8px; right: 8px; z-index: 900;
+    background: var(--panel-bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--muted); box-shadow: 0 2px 6px rgba(0,0,0,.12);
+  }
+
   @media (max-width: 640px) {
     .panel, .search-box { width: calc(50% - 18px); }
     .infobar { font-size: 12px; padding: 6px 10px; }
@@ -144,6 +158,7 @@
   <span class="brand">Environnement &mdash; Hydrocarbures</span>
   <button id="tab-btn-sites" class="active" onclick="switchTab('sites')">Sites et &eacute;quipements p&eacute;troliers</button>
   <button id="tab-btn-permis" onclick="switchTab('permis')">Titulaires de permis</button>
+  <button id="tab-btn-compare" onclick="switchTab('compare')">Comparer</button>
 </div>
 
 <div id="view-sites" class="view active">
@@ -209,6 +224,37 @@
   </div>
 </div>
 
+<div id="view-compare" class="view">
+  <div class="compare-wrap">
+    <div class="compare-pane">
+      <div id="map-compareSites" class="map"></div>
+      <div class="compare-label">🛢️ Sites et &eacute;quipements p&eacute;troliers</div>
+      <div class="compare-count" id="count-compareSites"></div>
+    </div>
+    <div class="compare-pane">
+      <div id="map-comparePermis" class="map"></div>
+      <div class="compare-label">📋 Titulaires de permis</div>
+      <div class="compare-count" id="count-comparePermis"></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Filtres (les deux cartes)</h3>
+    <label>R&eacute;gion administrative</label>
+    <select id="filter-region-compare" onchange="applyCompareFilters()"></select>
+    <label>Municipalit&eacute;</label>
+    <select id="filter-muni-compare" onchange="applyCompareFilters()"></select>
+    <div class="checkbox-row">
+      <input type="checkbox" id="filter-sanspermis-compare" onchange="applyCompareFilters()">
+      <label for="filter-sanspermis-compare">Sites sans permis actif seulement</label>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="filter-expire-compare" onchange="applyCompareFilters()">
+      <label for="filter-expire-compare">Permis expir&eacute;s/expirant seulement</label>
+    </div>
+    <button class="reset" onclick="resetCompareFilters()">R&eacute;initialiser</button>
+  </div>
+</div>
+
 <script>
 const REGION_NAMES = {
   1: "01 Bas-Saint-Laurent", 2: "02 Saguenay–Lac-Saint-Jean", 3: "03 Capitale-Nationale", 4: "04 Mauricie",
@@ -225,6 +271,8 @@ let allPoints = [];
 const state = {
   sites: { raw: [], data: [], map: null, cluster: null },
   permis: { raw: [], data: [], map: null, cluster: null },
+  compareSites: { raw: [], data: [], map: null, cluster: null },
+  comparePermis: { raw: [], data: [], map: null, cluster: null },
 };
 
 function numberFmt(n) {
@@ -309,17 +357,18 @@ function initMap(key, color) {
   }).addTo(s.map);
 }
 
-function draw(key) {
+function draw(key, kind) {
+  kind = kind || key;
   const s = state[key];
   if (s.cluster) s.map.removeLayer(s.cluster);
 
   s.cluster = L.markerClusterGroup({
     maxClusterRadius: 50,
-    iconCreateFunction: clusterIcon(key === 'sites' ? '#2f8f57' : '#2f6f8f'),
+    iconCreateFunction: clusterIcon(kind === 'sites' ? '#2f8f57' : '#2f6f8f'),
   });
 
   s.data.forEach(d => {
-    const color = key === 'sites' ? colorForSite(d) : colorForPermis(d);
+    const color = kind === 'sites' ? colorForSite(d) : colorForPermis(d);
     const marker = L.circleMarker([d.lat, d.lon], {
       radius: 7,
       fillColor: color,
@@ -327,16 +376,21 @@ function draw(key) {
       weight: 1,
       fillOpacity: 0.85,
     });
-    marker.bindPopup(key === 'sites' ? popupHtmlSites(d) : popupHtmlPermis(d));
+    marker.bindPopup(kind === 'sites' ? popupHtmlSites(d) : popupHtmlPermis(d));
     s.cluster.addLayer(marker);
   });
 
   s.map.addLayer(s.cluster);
 
-  document.getElementById('count-' + key).textContent = `${numberFmt(s.data.length)} point(s) affiché(s)`;
-  document.getElementById('infobar-' + key).textContent =
-    (key === 'sites' ? '\u{1F6E2}️ Sites et équipements pétroliers — ' : '\u{1F4CB} Titulaires de permis — ')
-    + `${numberFmt(s.data.length)} ${key === 'sites' ? 'site(s)' : 'permis'}`;
+  const countEl = document.getElementById('count-' + key);
+  if (countEl) countEl.textContent = `${numberFmt(s.data.length)} point(s) affiché(s)`;
+
+  const infobarEl = document.getElementById('infobar-' + key);
+  if (infobarEl) {
+    infobarEl.textContent =
+      (kind === 'sites' ? '\u{1F6E2}️ Sites et équipements pétroliers — ' : '\u{1F4CB} Titulaires de permis — ')
+      + `${numberFmt(s.data.length)} ${kind === 'sites' ? 'site(s)' : 'permis'}`;
+  }
 }
 
 function populateFilters(key) {
@@ -400,12 +454,86 @@ function goToSearch(key) {
   }
 }
 
+function populateCompareFilters() {
+  const regionSel = document.getElementById('filter-region-compare');
+  const muniSel = document.getElementById('filter-muni-compare');
+
+  regionSel.innerHTML = '<option value="">Toutes les régions</option>' +
+    Object.entries(REGION_NAMES).map(([code, name]) => `<option value="${code}">${name}</option>`).join('');
+
+  const allMunis = [...new Set(state.compareSites.raw.map(d => d.municipalite))].sort((a,b) => a.localeCompare(b, 'fr'));
+  muniSel.innerHTML = '<option value="">Toutes les municipalités</option>' +
+    allMunis.map(m => `<option value="${m}">${m}</option>`).join('');
+}
+
+function applyCompareFilters() {
+  const regionVal = document.getElementById('filter-region-compare').value;
+  const muniVal = document.getElementById('filter-muni-compare').value;
+  const sansPermisOnly = document.getElementById('filter-sanspermis-compare').checked;
+  const expireOnly = document.getElementById('filter-expire-compare').checked;
+
+  state.compareSites.data = state.compareSites.raw.filter(d => {
+    if (regionVal && String(d.region_code) !== regionVal) return false;
+    if (muniVal && d.municipalite !== muniVal) return false;
+    if (sansPermisOnly && d.has_permit) return false;
+    return true;
+  });
+  state.comparePermis.data = state.comparePermis.raw.filter(d => {
+    if (regionVal && String(d.region_code) !== regionVal) return false;
+    if (muniVal && d.municipalite !== muniVal) return false;
+    if (expireOnly && permitStatus(d) === 'ok') return false;
+    return true;
+  });
+
+  draw('compareSites', 'sites');
+  draw('comparePermis', 'permis');
+
+  if (muniVal) {
+    const pts = state.compareSites.data.map(d => [d.lat, d.lon]);
+    if (pts.length) state.compareSites.map.fitBounds(pts, { padding: [60, 60], maxZoom: 13 });
+  } else if (regionVal) {
+    const pts = state.compareSites.data.map(d => [d.lat, d.lon]);
+    if (pts.length) state.compareSites.map.fitBounds(pts, { padding: [40, 40] });
+  } else {
+    state.compareSites.map.setView(QC_CENTER, QC_ZOOM);
+  }
+}
+
+function resetCompareFilters() {
+  document.getElementById('filter-region-compare').value = '';
+  document.getElementById('filter-muni-compare').value = '';
+  document.getElementById('filter-sanspermis-compare').checked = false;
+  document.getElementById('filter-expire-compare').checked = false;
+  applyCompareFilters();
+}
+
+function syncMaps(mapA, mapB) {
+  let syncing = false;
+  mapA.on('move', () => {
+    if (syncing) return;
+    syncing = true;
+    mapB.setView(mapA.getCenter(), mapA.getZoom(), { animate: false });
+    syncing = false;
+  });
+  mapB.on('move', () => {
+    if (syncing) return;
+    syncing = true;
+    mapA.setView(mapB.getCenter(), mapB.getZoom(), { animate: false });
+    syncing = false;
+  });
+}
+
 function switchTab(key) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
   document.getElementById('view-' + key).classList.add('active');
   document.getElementById('tab-btn-' + key).classList.add('active');
-  if (state[key].map) {
+  if (key === 'compare') {
+    setTimeout(() => {
+      state.compareSites.map.invalidateSize();
+      state.comparePermis.map.invalidateSize();
+    }, 50);
+  } else if (state[key].map) {
     setTimeout(() => state[key].map.invalidateSize(), 50);
   }
 }
@@ -413,6 +541,9 @@ function switchTab(key) {
 async function main() {
   initMap('sites');
   initMap('permis');
+  initMap('compareSites');
+  initMap('comparePermis');
+  syncMaps(state.compareSites.map, state.comparePermis.map);
 
   const res = await fetch('sites_points.json');
   allPoints = await res.json();
@@ -427,6 +558,14 @@ async function main() {
   state.permis.data = permisPoints;
   populateFilters('permis');
   draw('permis');
+
+  state.compareSites.raw = allPoints;
+  state.compareSites.data = allPoints;
+  state.comparePermis.raw = permisPoints;
+  state.comparePermis.data = permisPoints;
+  populateCompareFilters();
+  draw('compareSites', 'sites');
+  draw('comparePermis', 'permis');
 }
 
 main();
