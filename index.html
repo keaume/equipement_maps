@@ -100,15 +100,18 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 10px 12px;
-    width: 230px;
+    width: 260px;
     box-shadow: 0 2px 10px rgba(0,0,0,.12);
     font-size: 13px;
   }
   .search-box label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
   .search-box .row { display: flex; gap: 6px; }
-  .search-box input { flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
-  .search-box button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-weight: 600; cursor: pointer; }
+  .search-box input { flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; min-width: 0; }
+  .search-box button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; font-weight: 600; cursor: pointer; flex-shrink: 0; }
   .search-box button:hover { background: var(--accent-dark); }
+  .search-box .hint { margin-top: 6px; color: var(--muted); font-size: 11px; }
+
+  .leaflet-control-zoom { margin-bottom: 24px !important; margin-right: 8px !important; }
 
   .legend {
     position: absolute; bottom: 20px; left: 12px; z-index: 900;
@@ -135,9 +138,10 @@
   .compare-pane { position: relative; flex: 1 1 50%; min-width: 0; border-right: 2px solid var(--accent-dark); }
   .compare-pane:last-child { border-right: none; }
   .compare-label {
-    position: absolute; top: 8px; left: 8px; z-index: 900;
+    position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 900;
     background: var(--panel-bg); border: 1px solid var(--border); border-radius: 6px;
     padding: 5px 10px; font-size: 12px; font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,.12);
+    white-space: nowrap;
   }
   .compare-count {
     position: absolute; top: 8px; right: 8px; z-index: 900;
@@ -165,9 +169,9 @@
   <div id="map-sites" class="map"></div>
   <div class="infobar" id="infobar-sites">Chargement&hellip;</div>
   <div class="search-box">
-    <label>Rechercher une municipalit&eacute;</label>
+    <label>Rechercher une adresse ou municipalit&eacute;</label>
     <div class="row">
-      <input type="text" id="search-sites" list="datalist-sites" placeholder="Ex: Amqui">
+      <input type="text" id="search-sites" list="datalist-sites" placeholder="Ex: 123 rue Principale, Amqui" onkeydown="if(event.key==='Enter')goToSearch('sites')">
       <button onclick="goToSearch('sites')">OK</button>
     </div>
     <datalist id="datalist-sites"></datalist>
@@ -196,9 +200,9 @@
   <div id="map-permis" class="map"></div>
   <div class="infobar" id="infobar-permis">Chargement&hellip;</div>
   <div class="search-box">
-    <label>Rechercher une municipalit&eacute;</label>
+    <label>Rechercher une adresse ou municipalit&eacute;</label>
     <div class="row">
-      <input type="text" id="search-permis" list="datalist-permis" placeholder="Ex: Amqui">
+      <input type="text" id="search-permis" list="datalist-permis" placeholder="Ex: 123 rue Principale, Amqui" onkeydown="if(event.key==='Enter')goToSearch('permis')">
       <button onclick="goToSearch('permis')">OK</button>
     </div>
     <datalist id="datalist-permis"></datalist>
@@ -236,6 +240,14 @@
       <div class="compare-label">📋 Titulaires de permis</div>
       <div class="compare-count" id="count-comparePermis"></div>
     </div>
+  </div>
+  <div class="search-box">
+    <label>Rechercher une adresse ou municipalit&eacute;</label>
+    <div class="row">
+      <input type="text" id="search-compare" list="datalist-compare" placeholder="Ex: 123 rue Principale, Amqui" onkeydown="if(event.key==='Enter')goToSearch('compare')">
+      <button onclick="goToSearch('compare')">OK</button>
+    </div>
+    <datalist id="datalist-compare"></datalist>
   </div>
   <div class="panel">
     <h3>Filtres (les deux cartes)</h3>
@@ -350,11 +362,47 @@ function popupHtmlPermis(d) {
 
 function initMap(key, color) {
   const s = state[key];
-  s.map = L.map('map-' + key, { zoomControl: true, preferCanvas: true }).setView(QC_CENTER, QC_ZOOM);
+  s.map = L.map('map-' + key, { zoomControl: false, preferCanvas: true }).setView(QC_CENTER, QC_ZOOM);
+  L.control.zoom({ position: 'bottomright' }).addTo(s.map);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
     maxZoom: 18,
   }).addTo(s.map);
+}
+
+function searchIcon() {
+  return L.divIcon({
+    html: '<div style="width:16px;height:16px;border-radius:50%;background:#0d6fbf;border:3px solid #fff;box-shadow:0 0 0 2px #0d6fbf, 0 2px 6px rgba(0,0,0,.4);"></div>',
+    className: '',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+}
+
+function placeSearchMarker(key, lat, lon, label) {
+  const s = state[key];
+  if (s.searchMarker) s.map.removeLayer(s.searchMarker);
+  s.searchMarker = L.marker([lat, lon], { icon: searchIcon(), zIndexOffset: 1000 })
+    .addTo(s.map)
+    .bindPopup(`<b class="title">📍 ${label}</b>`)
+    .openPopup();
+}
+
+async function geocodeAddress(query) {
+  try {
+    const url = 'https://geoegl.msp.gouv.qc.ca/apis/icherche/geocode?' + new URLSearchParams({
+      type: 'adresses', q: query, geometry: 'true', limit: 1,
+    });
+    const res = await fetch(url);
+    const data = await res.json();
+    const feats = data.features || [];
+    if (!feats.length) return null;
+    const [lon, lat] = feats[0].geometry.coordinates;
+    return { lat, lon, label: feats[0].properties.nom };
+  } catch (e) {
+    console.error('geocode error', e);
+    return null;
+  }
 }
 
 function draw(key, kind) {
@@ -439,24 +487,55 @@ function resetFilters(key) {
   if (key === 'sites') document.getElementById('filter-sanspermis-sites').checked = false;
   if (key === 'permis') document.getElementById('filter-expire-permis').checked = false;
   document.getElementById('search-' + key).value = '';
+  if (state[key].searchMarker) {
+    state[key].map.removeLayer(state[key].searchMarker);
+    state[key].searchMarker = null;
+  }
   applyFilters(key);
 }
 
-function goToSearch(key) {
-  const val = document.getElementById('search-' + key).value.trim();
+async function goToSearch(key) {
+  const input = document.getElementById('search-' + key);
+  const val = input.value.trim();
   if (!val) return;
-  const match = state[key].raw.find(d => d.municipalite.toLowerCase() === val.toLowerCase());
-  if (match) {
-    document.getElementById('filter-muni-' + key).value = match.municipalite;
-    applyFilters(key);
+
+  const raw = key === 'compare' ? state.compareSites.raw : state[key].raw;
+  const muniMatch = raw.find(d => d.municipalite.toLowerCase() === val.toLowerCase());
+
+  if (muniMatch) {
+    if (key === 'compare') {
+      document.getElementById('filter-muni-compare').value = muniMatch.municipalite;
+      applyCompareFilters();
+    } else {
+      document.getElementById('filter-muni-' + key).value = muniMatch.municipalite;
+      applyFilters(key);
+    }
+    return;
+  }
+
+  input.disabled = true;
+  const geo = await geocodeAddress(val + ', Québec');
+  input.disabled = false;
+
+  if (!geo) {
+    alert("Adresse ou municipalité introuvable.");
+    return;
+  }
+
+  if (key === 'compare') {
+    placeSearchMarker('compareSites', geo.lat, geo.lon, geo.label);
+    placeSearchMarker('comparePermis', geo.lat, geo.lon, geo.label);
+    state.compareSites.map.setView([geo.lat, geo.lon], 16);
   } else {
-    alert("Municipalité introuvable dans ce jeu de données.");
+    placeSearchMarker(key, geo.lat, geo.lon, geo.label);
+    state[key].map.setView([geo.lat, geo.lon], 16);
   }
 }
 
 function populateCompareFilters() {
   const regionSel = document.getElementById('filter-region-compare');
   const muniSel = document.getElementById('filter-muni-compare');
+  const dataList = document.getElementById('datalist-compare');
 
   regionSel.innerHTML = '<option value="">Toutes les régions</option>' +
     Object.entries(REGION_NAMES).map(([code, name]) => `<option value="${code}">${name}</option>`).join('');
@@ -464,6 +543,7 @@ function populateCompareFilters() {
   const allMunis = [...new Set(state.compareSites.raw.map(d => d.municipalite))].sort((a,b) => a.localeCompare(b, 'fr'));
   muniSel.innerHTML = '<option value="">Toutes les municipalités</option>' +
     allMunis.map(m => `<option value="${m}">${m}</option>`).join('');
+  dataList.innerHTML = allMunis.map(m => `<option value="${m}">`).join('');
 }
 
 function applyCompareFilters() {
@@ -504,6 +584,13 @@ function resetCompareFilters() {
   document.getElementById('filter-muni-compare').value = '';
   document.getElementById('filter-sanspermis-compare').checked = false;
   document.getElementById('filter-expire-compare').checked = false;
+  document.getElementById('search-compare').value = '';
+  ['compareSites', 'comparePermis'].forEach(k => {
+    if (state[k].searchMarker) {
+      state[k].map.removeLayer(state[k].searchMarker);
+      state[k].searchMarker = null;
+    }
+  });
   applyCompareFilters();
 }
 
