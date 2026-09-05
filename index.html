@@ -110,6 +110,21 @@
   .search-box button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; font-weight: 600; cursor: pointer; flex-shrink: 0; }
   .search-box button:hover { background: var(--accent-dark); }
   .search-box .hint { margin-top: 6px; color: var(--muted); font-size: 11px; }
+  .search-box .measure-btn {
+    margin-top: 8px; width: 100%; background: #fff; color: #0d6fbf;
+    border: 1px solid #0d6fbf; border-radius: 6px; padding: 7px 10px;
+    font-weight: 600; font-size: 12.5px; cursor: pointer;
+  }
+  .search-box .measure-btn:hover { background: #eaf3fb; }
+  .search-box .measure-btn.active { background: #0d6fbf; color: #fff; }
+
+  .measure-label {
+    background: #0d6fbf; color: #fff; font-size: 12px; font-weight: 700;
+    padding: 4px 8px; border-radius: 6px; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,.3);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .measure-close { cursor: pointer; opacity: .8; }
+  .measure-close:hover { opacity: 1; }
 
   .leaflet-control-zoom { margin-bottom: 24px !important; margin-right: 8px !important; }
 
@@ -213,6 +228,7 @@
       <button onclick="goToSearch('sites')">OK</button>
     </div>
     <datalist id="datalist-sites"></datalist>
+    <button class="measure-btn" id="measure-btn-sites" onclick="toggleMeasure('sites')">📏 Mesurer une distance</button>
   </div>
   <div class="panel">
     <h3>Filtres</h3>
@@ -244,6 +260,7 @@
       <button onclick="goToSearch('permis')">OK</button>
     </div>
     <datalist id="datalist-permis"></datalist>
+    <button class="measure-btn" id="measure-btn-permis" onclick="toggleMeasure('permis')">📏 Mesurer une distance</button>
   </div>
   <div class="panel">
     <h3>Filtres</h3>
@@ -297,6 +314,7 @@
       <button onclick="goToSearch('compare')">OK</button>
     </div>
     <datalist id="datalist-compare"></datalist>
+    <button class="measure-btn" id="measure-btn-compare" onclick="toggleCompareMeasure()">📏 Mesurer une distance</button>
   </div>
   <div class="panel">
     <h3>Filtres (les deux cartes)</h3>
@@ -361,10 +379,10 @@ const QC_ZOOM = 6;
 let allPoints = [];
 
 const state = {
-  sites: { raw: [], data: [], map: null, cluster: null },
-  permis: { raw: [], data: [], map: null, cluster: null },
-  compareSites: { raw: [], data: [], map: null, cluster: null },
-  comparePermis: { raw: [], data: [], map: null, cluster: null },
+  sites: { raw: [], data: [], map: null, cluster: null, measuring: false, measurePoints: [] },
+  permis: { raw: [], data: [], map: null, cluster: null, measuring: false, measurePoints: [] },
+  compareSites: { raw: [], data: [], map: null, cluster: null, measuring: false, measurePoints: [] },
+  comparePermis: { raw: [], data: [], map: null, cluster: null, measuring: false, measurePoints: [] },
 };
 
 function numberFmt(n) {
@@ -447,6 +465,92 @@ function initMap(key, color) {
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
     maxZoom: 18,
+  }).addTo(s.map);
+  s.map.on('click', (e) => handleMeasureClick(key, e.latlng));
+}
+
+const MEASURE_MARKER_STYLE = { radius: 6, color: '#0d6fbf', weight: 2, fillColor: '#fff', fillOpacity: 1 };
+
+function setMeasuring(key, on) {
+  const s = state[key];
+  if (on) clearMeasure(key);
+  s.measuring = on;
+  s.measurePoints = [];
+  s.map.getContainer().style.cursor = on ? 'crosshair' : '';
+}
+
+function clearMeasure(key) {
+  const s = state[key];
+  ['measureMarkerA', 'measureMarkerB', 'measureLine', 'measureLabel'].forEach(prop => {
+    if (s[prop]) { s.map.removeLayer(s[prop]); s[prop] = null; }
+  });
+  s.measurePoints = [];
+}
+
+function clearMeasureUI(key) {
+  clearMeasure(key);
+}
+
+function toggleMeasure(key) {
+  const s = state[key];
+  const newState = !s.measuring;
+  setMeasuring(key, newState);
+  const btn = document.getElementById('measure-btn-' + key);
+  btn.textContent = newState ? '✖ Annuler la mesure' : '📏 Mesurer une distance';
+  btn.classList.toggle('active', newState);
+}
+
+function toggleCompareMeasure() {
+  const newState = !state.compareSites.measuring;
+  setMeasuring('compareSites', newState);
+  setMeasuring('comparePermis', newState);
+  const btn = document.getElementById('measure-btn-compare');
+  btn.textContent = newState ? '✖ Annuler la mesure' : '📏 Mesurer une distance';
+  btn.classList.toggle('active', newState);
+}
+
+function finishMeasuring(key) {
+  setMeasuring(key, false);
+  if (key === 'compareSites' || key === 'comparePermis') {
+    const other = key === 'compareSites' ? 'comparePermis' : 'compareSites';
+    setMeasuring(other, false);
+    const btn = document.getElementById('measure-btn-compare');
+    btn.textContent = '📏 Mesurer une distance';
+    btn.classList.remove('active');
+  } else {
+    const btn = document.getElementById('measure-btn-' + key);
+    btn.textContent = '📏 Mesurer une distance';
+    btn.classList.remove('active');
+  }
+}
+
+function handleMeasureClick(key, latlng) {
+  const s = state[key];
+  if (!s.measuring) return;
+  s.measurePoints.push(latlng);
+  if (s.measurePoints.length === 1) {
+    s.measureMarkerA = L.circleMarker(latlng, MEASURE_MARKER_STYLE).addTo(s.map);
+  } else {
+    const [a, b] = s.measurePoints;
+    const distKm = a.distanceTo(b) / 1000;
+    drawMeasureResult(key, a, b, distKm);
+    finishMeasuring(key);
+  }
+}
+
+function drawMeasureResult(key, a, b, distKm) {
+  const s = state[key];
+  const label = distKm < 1 ? `${Math.round(distKm * 1000)} m` : `${distKm.toFixed(2)} km`;
+  s.measureMarkerB = L.circleMarker(b, MEASURE_MARKER_STYLE).addTo(s.map);
+  s.measureLine = L.polyline([a, b], { color: '#0d6fbf', weight: 3, dashArray: '6 6' }).addTo(s.map);
+  const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
+  s.measureLabel = L.marker(mid, {
+    icon: L.divIcon({
+      html: `<div class="measure-label">📏 ${label}<span class="measure-close" onclick="clearMeasureUI('${key}')">✕</span></div>`,
+      className: '',
+      iconSize: [150, 26],
+      iconAnchor: [75, 13],
+    }),
   }).addTo(s.map);
 }
 
@@ -546,7 +650,13 @@ function draw(key, kind) {
       weight: 1,
       fillOpacity: 0.85,
     });
-    marker.bindPopup(kind === 'sites' ? popupHtmlSites(d) : popupHtmlPermis(d));
+    marker.on('click', (e) => {
+      if (state[key].measuring) {
+        handleMeasureClick(key, e.latlng);
+      } else {
+        L.popup().setLatLng(e.latlng).setContent(kind === 'sites' ? popupHtmlSites(d) : popupHtmlPermis(d)).openOn(s.map);
+      }
+    });
     s.cluster.addLayer(marker);
   });
 
@@ -613,6 +723,8 @@ function resetFilters(key) {
     state[key].map.removeLayer(state[key].searchMarker);
     state[key].searchMarker = null;
   }
+  if (state[key].measuring) toggleMeasure(key);
+  clearMeasure(key);
   applyFilters(key);
 }
 
@@ -717,6 +829,9 @@ function resetCompareFilters() {
       state[k].searchMarker = null;
     }
   });
+  if (state.compareSites.measuring) toggleCompareMeasure();
+  clearMeasure('compareSites');
+  clearMeasure('comparePermis');
   applyCompareFilters();
 }
 
